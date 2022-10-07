@@ -1,5 +1,5 @@
 import os
-from IPython.display import Image
+#from IPython.display import Image
 from charset_normalizer import from_fp
 import torch
 from torchvision.utils import save_image
@@ -28,7 +28,7 @@ plt.imshow(img_denorm[0], cmap='gray')
 plt.show()
 '''
 # init DataLoader
-batch_size = 300
+batch_size = 2400
 data_loader = DataLoader(mnist, batch_size, shuffle=True)
 
 # init device

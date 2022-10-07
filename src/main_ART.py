@@ -1,53 +1,57 @@
 import os
-#from IPython.display import Image
 import torch
 from torchvision.utils import save_image, make_grid
 import torchvision.transforms as T
 from torchvision.datasets import MNIST, ImageFolder
 from torch.utils.data import DataLoader
 import torch.nn as nn
+import torchvision.utils as vutils
+import torchvision.transforms as transforms
 from tqdm import tqdm
+import numpy as np
+import random
 import matplotlib.pyplot as plt
 
 def main():
-    # Setting up data import
-    DATA_DIR = 'dataset/AnimeFacesDataset'
 
-    # Params of the data
+    # Root directory for dataset
+    dataroot = "dataset/WikiArtDataset/Impressionism2"
+
+    # Number of workers for dataloader
+    workers = 4
+
+    # Batch size during training
+    batch_size = 128
+
+    # Spatial size of training images. All images will be resized to this
+    #   size using a transformer.
     image_size = 64
-    batch_size = 512
-    stats = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5) # to normalize images valus between -1,1 instead of 0,1
 
-    # Load actual dataset
-    train_ds = ImageFolder(DATA_DIR, transform=T.Compose([
-        T.Resize(image_size),
-        T.CenterCrop(image_size),
-        T.ToTensor(),
-        T.Normalize(*stats)]))
+    # Size of z latent vector (i.e. size of generator input)
+    nz = 64
 
-    train_dl = DataLoader(train_ds, batch_size, shuffle=True, num_workers=3, pin_memory=True)
+    # Create the dataset
+    dataset = ImageFolder(root=dataroot,
+                            transform=transforms.Compose([
+                                transforms.Resize(image_size),
+                                transforms.CenterCrop(image_size),
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ]))
+    # Create the dataloader
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
+                                            shuffle=True, num_workers=workers)
 
-    # Define helper functions
-
-    def denorm(image_tensor):
-        return image_tensor * stats[1][0] + stats[0][0]
-
-    def show_images(images, nmax=64):
-        fig, ax = plt.subplots(figsize=(8,8))
-        ax.set_xticks([]); ax.set_yticks([])
-        ax.imshow(make_grid(denorm(images.detatch()[:nmax]), nrow=8).permute(1,2,0))
-        plt.show()
-
-    def show_batch(dl, nmax=64):
-        for images, _ in dl:
-            show_images(images, nmax)
-            break
-
+    # Helper functions
     def get_default_device():
         if torch.cuda.is_available():
             return torch.device('cuda')
         else:
             return torch.device('cpu')
+    
+    stats = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5) # to normalize images valus between -1,1 instead of 0,1
+    def denorm(image_tensor):
+        return image_tensor * stats[1][0] + stats[0][0]
 
     def to_device(data, device):
         if isinstance(data, (list, tuple)):
@@ -65,19 +69,27 @@ def main():
 
         def __len__(self):
             return len(self.dl)
-
+    
+    
     device = get_default_device()
-    train_dl = DeviceDataLoader(train_dl, device)
-
-    # init device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Device:', device)
+    dataloader = DeviceDataLoader(dataloader, device)
 
+    # Plot some training images
+    real_batch = next(iter(dataloader))
+    plt.figure(figsize=(8,8))
+    plt.axis("off")
+    plt.title("Training Images")
+    plt.imshow(np.transpose(vutils.make_grid(real_batch[0].to(device)[:64], padding=2, normalize=True).cpu(),(1,2,0)))
+    plt.show()
+
+    #####################################################
     # DISCRIMINATOR MODEL 
+    #####################################################
 
     # leakyrelu since letting some neg grad info flow to generator helps
     D = nn.Sequential(
-        # in: 3 (color channels) x 64 x 64 (pixel)
+        # in: 3 (color channels) x 128 x 128 (pixel)
         # this size is for a single image, but models processes batches so that dimension 
         # is multiplied by batch_size
 
@@ -85,22 +97,23 @@ def main():
         # stride 2 makes half the size of the pixel every iter
         nn.BatchNorm2d(64), #  batch norm helps to keep gradient uniform
         nn.LeakyReLU(0.2, inplace=True),
-        # out: 64 (channels) x 32 x 32 
+        # out: 64 (channels) x 64 x 64 
 
         nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1, bias=False),
         nn.BatchNorm2d(128),
         nn.LeakyReLU(0.2, inplace=True),
-        # out: 128 (channels) x 16 x 16
+        # out: 128 (channels) x32 x 32
 
         nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1, bias=False),
         nn.BatchNorm2d(256),
         nn.LeakyReLU(0.2, inplace=True),
-        # out: 256 x 8 x 8
+        # out: 256 x 16 x 16
 
         nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1, bias=False),
         nn.BatchNorm2d(512),
         nn.LeakyReLU(0.2, inplace=True),
-        # out: 512 x 4 x 4
+        # out: 512 x 8 x 8
+
         
         nn.Conv2d(512, 1, kernel_size=4, stride=1, padding=0, bias=False),
         # strid 1, no pading so convolution covers precisely the 4x4 image and output 1
@@ -110,18 +123,21 @@ def main():
         nn.Sigmoid())
 
     D = to_device(D, device)
-
-
-    # GENERATOR MODEL 
-    latent_size = 128
+    '''nn.Conv2d(512, 1024, kernel_size=4, stride=2, padding=1, bias=False),
+        nn.BatchNorm2d(1024),
+        nn.LeakyReLU(0.2, inplace=True),
+        # out: 1024 x 4 x 4'''
+    ###################################
+    # GENERATOR MODEL
+    ################################### 
 
     # relu since negative info does not help further the discriminator
-    # operation is opposite to convolution, we reduce channels why incresing dimensions
+    # operation is opposite to convolution, we reduce channels while incresing dimensions
     G = nn.Sequential(
         # in: latent_size x 1 x 1
         # it starts from a random vector
 
-        nn.ConvTranspose2d(latent_size, 512, kernel_size=4, stride=1, padding=0, bias=False),
+        nn.ConvTranspose2d(nz, 512, kernel_size=4, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(512),
         nn.ReLU(True),
         # out: 512 x 4 x 4
@@ -144,12 +160,17 @@ def main():
         
         nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1, bias=False),
         nn.Tanh() # bring balues to -1,1 normalization as input images
-        # out: 3 x 64 x 64
+        # out: 3 x 128 x 128
     )
+
+    '''nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1, bias=False),
+    nn.BatchNorm2d(32),
+    nn.ReLU(True),
+    # out: 32 x 64 x 64'''
 
     G = to_device(G, device)
 
-    # optim params
+ # optim params
     lr = 0.0002
     criterion = nn.BCELoss()
     d_opt = torch.optim.Adam(D.parameters(), lr, betas=(0.5, 0.999)) # betas are empirical params found to work well
@@ -169,7 +190,7 @@ def main():
         real_score = torch.mean(real_preds).item()
 
         # Loss for fake images
-        z = torch.randn(batch_size, latent_size, 1, 1).to(device)
+        z = torch.randn(batch_size, nz, 1, 1).to(device)
         fake_images = G(z)
         fake_preds  = D(fake_images)
         fake_labels = torch.zeros(fake_images.size(0), 1).to(device)
@@ -191,7 +212,7 @@ def main():
     # generator training fcn
     def train_generator():
         # generate fake images and loss computation
-        z = torch.randn(batch_size, latent_size, 1, 1).to(device)
+        z = torch.randn(batch_size, nz, 1, 1).to(device)
         fake_images = G(z)
         labels = torch.ones(batch_size, 1).to(device) # labeled as true even if fake to train to produce similar to real ones
         g_loss = criterion(D(fake_images), labels)    # loss will be low of discriminator will recognize as true 
@@ -204,30 +225,30 @@ def main():
 
         
     # dir to output samples
-    sample_dir = 'samples/manga'
+    sample_dir = 'samples/art'
     if not os.path.exists(sample_dir):
         os.makedirs(sample_dir)
 
     # define a constant set of images to track evolution of the model
-    sample_vectors = torch.randn(batch_size, latent_size, 1, 1).to(device)
+    sample_vectors = torch.randn(batch_size, nz, 1, 1).to(device)
 
     def save_fake_images(idx, sample_vectors):
         fake_images = G(sample_vectors)
         fake_fname = 'generated_images-{0:0=4d}.png'.format(idx)
-        save_image(denorm(fake_images), os.path.join(sample_dir, fake_fname), nrow=8)
+        save_image(denorm(fake_images), os.path.join(sample_dir, fake_fname), nrow=4)
 
     # save initial images before training
     save_fake_images(0, sample_vectors)
 
     # training function
-    num_epochs = 20
+    num_epochs = 50
     d_losses, g_losses, real_scores, fake_scores = [], [], [], []
 
     def fit(num_epochs):
         torch.cuda.empty_cache()
 
         for epoch in range(num_epochs):
-            for real_images, _ in tqdm(train_dl):
+            for real_images, _ in tqdm(dataloader):
 
                 # train discriminator and generator
                 d_loss, real_score, fake_score = train_discriminator(real_images)
@@ -249,6 +270,7 @@ def main():
 
     # running training
     history = fit(num_epochs)
+
 
 if __name__ == "__main__":
     main()
